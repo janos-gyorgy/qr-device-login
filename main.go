@@ -69,8 +69,8 @@ func main() {
 		RedisAddr:               getEnv("REDIS_ADDR", "localhost:6379"),
 		AllowedEmail:            mustEnv("ALLOWED_EMAIL"),
 		PublicURL:               mustEnv("PUBLIC_URL"),
-		PostLoginURL:            getEnv("POST_LOGIN_URL", "https://home.hippotion.com"),
-		CookieDomain:            getEnv("COOKIE_DOMAIN", ".hippotion.com"),
+		PostLoginURL:            getEnv("POST_LOGIN_URL", "/"),
+		CookieDomain:            getEnv("COOKIE_DOMAIN", ""),
 		OAuth2ProxyCookieSecret: getEnv("OAUTH2_PROXY_COOKIE_SECRET", ""),
 	}
 
@@ -513,7 +513,7 @@ p{font-size:.8rem;color:#8b949e;margin-bottom:2rem;line-height:1.5}
 </head>
 <body>
 <div class="card">
-  <div class="brand">hippotion.com</div>
+  <div class="brand">homelab</div>
   <div class="icon">🔑</div>
   <h2>Tap to authenticate</h2>
   <p>You must be signed into GitLab<br>in <strong>this browser</strong> before continuing.</p>
@@ -555,7 +555,7 @@ p{font-size:.8rem;color:#8b949e;margin-bottom:1.8rem}
 </head>
 <body data-token="{{.Token}}" data-rd="{{.RD}}">
 <div class="card">
-  <div class="brand">hippotion.com</div>
+  <div class="brand">homelab</div>
   <div class="qr"><img src="{{.QR}}" alt="Login QR Code"></div>
   <h2>Scan to log in</h2>
   <p>Point your phone's camera at the code,<br>then approve on GitLab.</p>

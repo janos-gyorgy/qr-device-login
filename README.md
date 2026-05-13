@@ -6,7 +6,7 @@ The PC shows a QR code. You scan it with your phone, complete GitLab OAuth there
 
 ## How it works
 
-<img width="1536" height="1024" alt="QR" src="https://github.com/user-attachments/assets/49959036-09e2-4e36-8e2b-0615e464c394" />
+<img width="1536" height="1024" alt="QR2" src="https://github.com/user-attachments/assets/c8103454-b7e1-4023-be36-da58f2379635" />
 
 1. PC opens `qr.yourdomain.com` — a QR code is shown, the page polls for authentication
 2. Phone scans the QR code, opens the device page, taps **Continue with GitLab**

@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -19,8 +21,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pierrec/lz4/v4"
 	"github.com/redis/go-redis/v9"
 	"github.com/skip2/go-qrcode"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 const (
@@ -48,8 +52,9 @@ type deviceToken struct {
 }
 
 type sessionData struct {
-	Email    string `json:"email"`
-	Username string `json:"username"`
+	Email       string `json:"email"`
+	Username    string `json:"username"`
+	AccessToken string `json:"access_token,omitempty"`
 }
 
 var (
@@ -208,7 +213,7 @@ func handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	email, username, err := exchangeCode(ctx, code)
+	email, username, accessToken, err := exchangeCode(ctx, code)
 	if err != nil {
 		log.Printf("token exchange: %v", err)
 		http.Error(w, "authentication failed", 500)
@@ -220,7 +225,7 @@ func handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID := randHex(32)
-	sess := sessionData{Email: email, Username: username}
+	sess := sessionData{Email: email, Username: username, AccessToken: accessToken}
 	sessData, _ := json.Marshal(sess)
 	rdb.Set(ctx, "session:"+sessionID, sessData, sessionTTL)
 
@@ -275,7 +280,7 @@ func handlePoll(w http.ResponseWriter, r *http.Request) {
 				json.Unmarshal([]byte(raw), &sd)
 			}
 			if sd.Email != "" {
-				if val, err := forgeOAuth2ProxyCookie(sd.Email, sd.Username, ac.OAuth2ProxyCookieSecret); err == nil {
+				if val, err := forgeOAuth2ProxyCookie(sd.Email, sd.Username, sd.AccessToken, ac.OAuth2ProxyCookieSecret); err == nil {
 					http.SetCookie(w, &http.Cookie{
 						Name:     "_oauth2_proxy",
 						Value:    val,
@@ -286,9 +291,11 @@ func handlePoll(w http.ResponseWriter, r *http.Request) {
 						SameSite: http.SameSiteLaxMode,
 					})
 				} else {
-					log.Printf("forgeOAuth2ProxyCookie: %v", err)
+					log.Printf("poll: forgeOAuth2ProxyCookie error: %v", err)
 				}
 			}
+		} else {
+			log.Printf("poll: OAUTH2_PROXY_COOKIE_SECRET not set, skipping cookie forge")
 		}
 
 		json.NewEncoder(w).Encode(map[string]string{
@@ -317,7 +324,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "ok")
 }
 
-func exchangeCode(ctx context.Context, code string) (email, username string, err error) {
+func exchangeCode(ctx context.Context, code string) (email, username, accessToken string, err error) {
 	resp, err := http.PostForm("https://gitlab.com/oauth/token", url.Values{
 		"client_id":     {ac.ClientID},
 		"client_secret": {ac.ClientSecret},
@@ -359,51 +366,96 @@ func exchangeCode(ctx context.Context, code string) (email, username string, err
 	if err = json.Unmarshal(userBody, &user); err != nil {
 		return
 	}
-	email, username = user.Email, user.Username
+	email, username, accessToken = user.Email, user.Username, tokenResp.AccessToken
 	return
 }
 
-// forgeOAuth2ProxyCookie creates a cookie value accepted by oauth2-proxy (chart 10.x / app v7.x).
-// It replicates oauth2-proxy's AES-256-GCM cookie cipher exactly:
-//   - base64-decode the secret (matches oauth2-proxy's SecretBytes helper)
-//   - SHA-256 hash → 32-byte AES key
-//   - AES-GCM encrypt the JSON session; prepend nonce; base64-RawURL encode
-func forgeOAuth2ProxyCookie(email, user, encodedSecret string) (string, error) {
-	secret, err := base64.StdEncoding.DecodeString(encodedSecret)
-	if err != nil {
-		if secret, err = base64.URLEncoding.DecodeString(encodedSecret); err != nil {
-			secret = []byte(encodedSecret)
-		}
-	}
-
-	h := sha256.Sum256(secret)
-	block, err := aes.NewCipher(h[:])
-	if err != nil {
-		return "", err
-	}
-	gcm, err := cipher.NewGCM(block)
+// forgeOAuth2ProxyCookie creates a cookie value accepted by oauth2-proxy v7.15 (chart 10.x).
+//
+// Matches oauth2-proxy's exact encoding pipeline:
+//  1. msgpack-serialize the session state
+//  2. lz4-compress the msgpack bytes
+//  3. AES-CFB encrypt (key = secretBytes(secret)); format: iv(16) || ciphertext
+//  4. base64.URLEncoding-encode the encrypted bytes
+//  5. HMAC-SHA256: key=raw_secret, input=cookieName+encodedVal+timestamp (concatenated, no sep)
+//  6. Cookie value: encodedVal|timestamp|base64.URLEncoding(hmac)
+func forgeOAuth2ProxyCookie(email, user, accessToken, encodedSecret string) (string, error) {
+	aesKey := oauth2ProxySecretBytes(encodedSecret)
+	block, err := aes.NewCipher(aesKey)
 	if err != nil {
 		return "", err
 	}
 
 	now := time.Now()
 	expires := now.Add(sessionTTL)
+
 	type oauthSession struct {
-		CreatedAt *time.Time `json:"ca"`
-		ExpiresOn *time.Time `json:"ea"`
-		Email     string     `json:"e"`
-		User      string     `json:"u"`
+		CreatedAt   *time.Time `msgpack:"ca,omitempty"`
+		ExpiresOn   *time.Time `msgpack:"eo,omitempty"`
+		AccessToken string     `msgpack:"at,omitempty"`
+		Email       string     `msgpack:"e,omitempty"`
+		User        string     `msgpack:"u,omitempty"`
 	}
-	plaintext, err := json.Marshal(oauthSession{CreatedAt: &now, ExpiresOn: &expires, Email: email, User: user})
+	packed, err := msgpack.Marshal(&oauthSession{
+		CreatedAt: &now, ExpiresOn: &expires,
+		AccessToken: accessToken, Email: email, User: user,
+	})
 	if err != nil {
 		return "", err
 	}
 
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
+	compressed, err := lz4CompressSession(packed)
+	if err != nil {
 		return "", err
 	}
-	return base64.RawURLEncoding.EncodeToString(gcm.Seal(nonce, nonce, plaintext, nil)), nil
+
+	// AES-CFB: prepend random IV
+	ciphertext := make([]byte, aes.BlockSize+len(compressed))
+	iv := ciphertext[:aes.BlockSize]
+	if _, err = io.ReadFull(rand.Reader, iv); err != nil {
+		return "", err
+	}
+	//nolint:staticcheck
+	cipher.NewCFBEncrypter(block, iv).XORKeyStream(ciphertext[aes.BlockSize:], compressed)
+
+	encodedVal := base64.URLEncoding.EncodeToString(ciphertext)
+	ts := fmt.Sprintf("%d", now.Unix())
+
+	mac := hmac.New(sha256.New, []byte(encodedSecret))
+	mac.Write([]byte("_oauth2_proxy"))
+	mac.Write([]byte(encodedVal))
+	mac.Write([]byte(ts))
+
+	return fmt.Sprintf("%s|%s|%s", encodedVal, ts, base64.URLEncoding.EncodeToString(mac.Sum(nil))), nil
+}
+
+// oauth2ProxySecretBytes mirrors oauth2-proxy's encryption.SecretBytes:
+// try base64 RawURL decode; only use result if it's a valid AES key length (16/24/32).
+// Otherwise fall back to the raw string bytes.
+func oauth2ProxySecretBytes(secret string) []byte {
+	b, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(secret, "="))
+	if err == nil {
+		for _, n := range []int{16, 24, 32} {
+			if len(b) == n {
+				return b
+			}
+		}
+	}
+	return []byte(secret)
+}
+
+func lz4CompressSession(payload []byte) ([]byte, error) {
+	buf := new(bytes.Buffer)
+	zw := lz4.NewWriter(nil)
+	zw.Apply(lz4.BlockSizeOption(lz4.BlockSize(65536)), lz4.CompressionLevelOption(lz4.Fast))
+	zw.Reset(buf)
+	if _, err := io.Copy(zw, bytes.NewReader(payload)); err != nil {
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return io.ReadAll(buf)
 }
 
 func expiredCookie() *http.Cookie {

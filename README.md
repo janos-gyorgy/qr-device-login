@@ -6,22 +6,8 @@ The PC shows a QR code. You scan it with your phone, complete GitLab OAuth there
 
 ## How it works
 
-```
-PC browser                    qr-device-login             Phone browser
-    |                               |                           |
-    |-- GET /                       |                           |
-    |<-- QR code page (polls /poll) |                           |
-    |                               |                           |
-    |                   (scan QR code)                          |
-    |                               |<-- GET /device?token=...  |
-    |                               |--- redirect to GitLab --> |
-    |                               |                           |-- GitLab OAuth -->
-    |                               |<-- GET /callback?code=... |
-    |                               |--- "Screen unlocked" ---> |
-    |                               |                           |
-    |<-- /poll returns authed ------| (sets session cookies)    |
-    |--- redirect to home ----------|                           |
-```
+<img width="1536" height="1024" alt="QR" src="https://github.com/user-attachments/assets/49959036-09e2-4e36-8e2b-0615e464c394" />
+
 
 The device token is single-use and expires in 5 minutes. The phone gets an "End Session" button that invalidates the server-side session immediately.
 

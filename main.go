@@ -173,7 +173,7 @@ func handleDevice(w http.ResponseWriter, r *http.Request) {
 		"client_id":     {ac.ClientID},
 		"redirect_uri":  {ac.RedirectURI},
 		"response_type": {"code"},
-		"scope":         {"read_user openid"},
+		"scope":         {"read_user"},
 		"state":         {token},
 	}.Encode()
 	http.Redirect(w, r, authURL, http.StatusFound)

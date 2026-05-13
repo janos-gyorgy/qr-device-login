@@ -2,20 +2,27 @@
 
 A small Go service that lets you log in to a PC browser by scanning a QR code on your phone.
 
-The PC shows a QR code. You scan it with your phone, complete GitLab OAuth there, and the PC session unlocks — no typing on the PC required. Works alongside [oauth2-proxy](https://github.com/oauth2-proxy/oauth2-proxy): after QR login, all oauth2-proxy-protected apps on the same domain are accessible without a separate login prompt.
+The PC shows a QR code. You scan it with your phone, complete GitLab OAuth there, and the PC session unlocks — no typing on the PC required. Works alongside [oauth2-proxy](https://github.com/oauth2-proxy/oauth2-proxy): after QR login, all oauth2-proxy-protected apps on the same domain are accessible without a separate login prompt. End Session on the phone immediately revokes access to all of them.
 
 ## How it works
 
 <img width="1536" height="1024" alt="QR" src="https://github.com/user-attachments/assets/49959036-09e2-4e36-8e2b-0615e464c394" />
 
+1. PC opens `qr.yourdomain.com` — a QR code is shown, the page polls for authentication
+2. Phone scans the QR code, opens the device page, taps **Continue with GitLab**
+3. Phone completes GitLab OAuth
+4. Server marks the session as authenticated, creates a Redis-backed oauth2-proxy session ticket
+5. PC's poll returns success, sets `_oauth2_proxy` session cookie, redirects to your home URL
+6. All oauth2-proxy-protected apps on the domain are immediately accessible
+7. Phone shows **End Session** button — tapping it deletes the session from Redis, immediately revoking access everywhere
 
-The device token is single-use and expires in 5 minutes. The phone gets an "End Session" button that invalidates the server-side session immediately.
+The device token is single-use and expires in 5 minutes. Sessions are stored in Redis and can be revoked instantly.
 
 ## Requirements
 
 - GitLab OAuth application (gitlab.com or self-managed)
 - Redis (ephemeral, no persistence needed)
-- oauth2-proxy deployed on the same cookie domain (optional but recommended — see [Cookie integration](#cookie-integration))
+- oauth2-proxy configured with Redis session storage (see [oauth2-proxy integration](#oauth2-proxy-integration))
 
 ## Configuration
 
@@ -29,24 +36,45 @@ All configuration is via environment variables.
 | `ALLOWED_EMAIL` | yes | Single email address permitted to log in |
 | `PUBLIC_URL` | yes | Base URL of this service (`https://qr.yourdomain.com`) |
 | `REDIS_ADDR` | no | Redis address (default: `localhost:6379`) |
-| `POST_LOGIN_URL` | no | Where to redirect the PC after successful auth (default: `https://home.yourdomain.com`) |
-| `COOKIE_DOMAIN` | no | Cookie domain scope (default: `.yourdomain.com`) |
-| `OAUTH2_PROXY_COOKIE_SECRET` | no | See [Cookie integration](#cookie-integration) |
+| `POST_LOGIN_URL` | no | Where to redirect the PC after successful auth (default: `/`) |
+| `COOKIE_DOMAIN` | no | Cookie domain scope (default: empty) |
+| `OAUTH2_PROXY_COOKIE_SECRET` | no | See [oauth2-proxy integration](#oauth2-proxy-integration) |
 
 ## GitLab OAuth app setup
 
 1. Go to `https://gitlab.com/-/profile/applications`
 2. Create a new application:
-   - **Name:** anything
    - **Redirect URI:** `https://qr.yourdomain.com/callback`
-   - **Scopes:** `read_user`, `openid`
+   - **Scopes:** `read_user`
 3. Copy the Application ID and Secret into `GITLAB_CLIENT_ID` / `GITLAB_CLIENT_SECRET`
 
-## Cookie integration
+**Note on mobile browsers:** When the phone scans the QR code, it opens the device page in whichever browser the camera uses. If GitLab is not already logged in in that browser, an intermediate page is shown with a "Continue with GitLab" button — this gives you a chance to be in the right browser before the OAuth redirect starts. Direct auto-redirect causes GitLab to lose the OAuth state during the sign-in flow on mobile.
 
-If you run oauth2-proxy on the same domain, set `OAUTH2_PROXY_COOKIE_SECRET` to the same value as oauth2-proxy's `--cookie-secret`. After QR login, the service sets a valid `_oauth2_proxy` session cookie so all protected apps on the domain work immediately — no second login needed.
+## oauth2-proxy integration
 
-The cookie secret must be the same value oauth2-proxy is using. If you generated it with `openssl rand -base64 24`, store and pass that base64 string as-is.
+This is where the interesting part lives. When `OAUTH2_PROXY_COOKIE_SECRET` is set, qr-device-login creates a proper oauth2-proxy persistence ticket in Redis and sets the `_oauth2_proxy` session cookie. After QR login, all apps on the domain that use oauth2-proxy ForwardAuth work without a second login prompt.
+
+**For End Session to revoke access immediately** (not just expire after a timeout), oauth2-proxy must be configured to use Redis session storage pointing at the same Redis instance:
+
+```
+--session-store-type=redis
+--redis-connection-url=redis://your-redis:6379
+```
+
+Without Redis sessions on the oauth2-proxy side, End Session still works for the QR page itself but the `_oauth2_proxy` cookie in the browser remains valid until it naturally expires.
+
+`OAUTH2_PROXY_COOKIE_SECRET` must be the same value as oauth2-proxy's `--cookie-secret`. If generated with `openssl rand -base64 24`, pass that base64 string as-is.
+
+### How the session ticket works
+
+qr-device-login replicates oauth2-proxy v7's persistence ticket format exactly:
+- Generates a random ticket ID (`_oauth2_proxy-<hex>`) and a 16-byte per-session AES key
+- Encrypts the session state (msgpack-encoded, no compression) with AES-128-GCM using the ticket key
+- Stores the encrypted session in Redis under the ticket ID
+- Signs the ticket string (`v2.<ticketID_b64>.<ticketKey_b64>`) using oauth2-proxy's HMAC format
+- Sets the signed ticket as the `_oauth2_proxy` cookie
+
+This matches oauth2-proxy v7.15 exactly. When End Session is called, both the qr session and the oauth2-proxy ticket are deleted from Redis — the next ForwardAuth request for any app will immediately fail and redirect to login.
 
 ## Running locally
 
@@ -67,7 +95,13 @@ docker run \
 
 ## Kubernetes deployment
 
-See [`k8s/`](k8s/) for example manifests. The example uses a Redis sidecar in the same namespace and a Traefik IngressRoute, but the service itself has no hard dependency on either — any reverse proxy and any Redis-compatible store will work.
+See [`k8s/`](k8s/) for example manifests. Configure your oauth2-proxy deployment to use the same Redis:
+
+```yaml
+# add to your oauth2-proxy deployment args
+- --session-store-type=redis
+- --redis-connection-url=redis://qr-device-login-redis:6379
+```
 
 ## Building
 

@@ -1,0 +1,159 @@
+# Example Kubernetes manifests for qr-device-login
+#
+# Replace all occurrences of:
+#   qr.yourdomain.com     → your QR login hostname
+#   home.yourdomain.com   → where to land after login
+#   .yourdomain.com       → your cookie domain
+#   you@example.com       → your allowed email
+#
+# Secrets: this example reads from a Kubernetes Secret named 'qr-device-login'.
+# Create it however fits your stack (kubectl create secret, ESO, SOPS, etc.):
+#
+#   kubectl create secret generic qr-device-login \
+#     --from-literal=gitlab-client-id=<id> \
+#     --from-literal=gitlab-client-secret=<secret> \
+#     --from-literal=oauth2-proxy-cookie-secret=<cookie-secret>  # optional
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: qr-device-login
+
+---
+# Redis — ephemeral session store, no persistence needed
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: qr-device-login
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["--save", "", "--appendonly", "no"]
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 10m
+            limits:
+              memory: 64Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: qr-device-login
+spec:
+  selector:
+    app.kubernetes.io/name: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qr-device-login
+  namespace: qr-device-login
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: qr-device-login
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qr-device-login
+    spec:
+      containers:
+        - name: qr-device-login
+          image: ghcr.io/janos-gyorgy/qr-device-login:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: GITLAB_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: qr-device-login
+                  key: gitlab-client-id
+            - name: GITLAB_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: qr-device-login
+                  key: gitlab-client-secret
+            - name: GITLAB_REDIRECT_URI
+              value: "https://qr.yourdomain.com/callback"
+            - name: REDIS_ADDR
+              value: "redis.qr-device-login.svc.cluster.local:6379"
+            - name: ALLOWED_EMAIL
+              value: "you@example.com"
+            - name: PUBLIC_URL
+              value: "https://qr.yourdomain.com"
+            - name: POST_LOGIN_URL
+              value: "https://home.yourdomain.com"
+            - name: COOKIE_DOMAIN
+              value: ".yourdomain.com"
+            # Remove if not using oauth2-proxy cookie integration
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: qr-device-login
+                  key: oauth2-proxy-cookie-secret
+                  optional: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+            limits:
+              memory: 64Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qr-device-login
+  namespace: qr-device-login
+spec:
+  selector:
+    app.kubernetes.io/name: qr-device-login
+  ports:
+    - port: 80
+      targetPort: 8080
+
+---
+# Example Traefik IngressRoute — replace with your own ingress if not using Traefik
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: qr-device-login
+  namespace: qr-device-login
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`qr.yourdomain.com`)
+      kind: Rule
+      services:
+        - name: qr-device-login
+          port: 80
+  tls: {}

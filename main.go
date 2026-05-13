@@ -65,8 +65,8 @@ func main() {
 		RedisAddr:               getEnv("REDIS_ADDR", "localhost:6379"),
 		AllowedEmail:            mustEnv("ALLOWED_EMAIL"),
 		PublicURL:               mustEnv("PUBLIC_URL"),
-		PostLoginURL:            getEnv("POST_LOGIN_URL", "/"),
-		CookieDomain:            getEnv("COOKIE_DOMAIN", ""),
+		PostLoginURL:            getEnv("POST_LOGIN_URL", "https://home.hippotion.com"),
+		CookieDomain:            getEnv("COOKIE_DOMAIN", ".hippotion.com"),
 		OAuth2ProxyCookieSecret: getEnv("OAUTH2_PROXY_COOKIE_SECRET", ""),
 	}
 
@@ -176,7 +176,10 @@ func handleDevice(w http.ResponseWriter, r *http.Request) {
 		"scope":         {"read_user"},
 		"state":         {token},
 	}.Encode()
-	http.Redirect(w, r, authURL, http.StatusFound)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	deviceTmpl.Execute(w, map[string]string{"AuthURL": authURL})
 }
 
 // handleCallback receives the GitLab OAuth callback on the phone's browser.
@@ -433,6 +436,42 @@ func getEnv(key, def string) string {
 
 // ── Templates ────────────────────────────────────────────────────────────────
 
+var deviceTmpl = template.Must(template.New("device").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Authenticate</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{min-height:100vh;display:flex;align-items:center;justify-content:center;
+     background:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#c9d1d9}
+.card{text-align:center;padding:2.5rem 2rem;background:#161b22;
+      border:1px solid #30363d;border-radius:16px;width:90%;max-width:360px}
+.brand{font-size:.9rem;font-weight:600;color:#58a6ff;letter-spacing:.08em;
+       text-transform:uppercase;margin-bottom:1.8rem}
+.icon{font-size:2.5rem;margin-bottom:1rem}
+h2{font-size:1rem;font-weight:500;color:#e6edf3;margin-bottom:.5rem}
+p{font-size:.8rem;color:#8b949e;margin-bottom:2rem;line-height:1.5}
+.btn{display:block;background:#fc6d26;color:#fff;text-decoration:none;
+     border-radius:10px;padding:1rem;font-size:1rem;font-weight:600}
+.btn:active{opacity:.75}
+.note{font-size:.72rem;color:#484f58;margin-top:1.2rem;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="brand">hippotion.com</div>
+  <div class="icon">🔑</div>
+  <h2>Tap to authenticate</h2>
+  <p>You must be signed into GitLab<br>in <strong>this browser</strong> before continuing.</p>
+  <a class="btn" href="{{.AuthURL}}">Continue with GitLab</a>
+  <div class="note">Not signed in? Open gitlab.com first,<br>sign in, then come back and tap above.</div>
+</div>
+</body>
+</html>
+`))
+
 var indexTmpl = template.Must(template.New("index").Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -464,7 +503,7 @@ p{font-size:.8rem;color:#8b949e;margin-bottom:1.8rem}
 </head>
 <body data-token="{{.Token}}" data-rd="{{.RD}}">
 <div class="card">
-  <div class="brand">homelab</div>
+  <div class="brand">hippotion.com</div>
   <div class="qr"><img src="{{.QR}}" alt="Login QR Code"></div>
   <h2>Scan to log in</h2>
   <p>Point your phone's camera at the code,<br>then approve on GitLab.</p>

@@ -85,6 +85,9 @@ func main() {
 	mux.HandleFunc("GET /poll", handlePoll)
 	mux.HandleFunc("POST /logout", handleLogout)
 	mux.HandleFunc("GET /_qr/", handleIndex)
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/_qr/", http.StatusFound)
+	})
 
 	log.Println("listening :8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))
